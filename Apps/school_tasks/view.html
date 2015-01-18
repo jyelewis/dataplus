@@ -1,0 +1,85 @@
+<div id="schoolTasksApp">
+	<table>
+		<tr class="titles">
+			<td>Organisation</td>
+			<td>Homework</td>
+			<td>Assessment tasks</td>
+			<td>Study</td>
+		</tr>
+	
+		<tr>
+			{% for type in ['Organisation', 'Homework', 'Assessment task', 'Study'] %}
+				<td>
+					{% for task in keyedTasks[type] %}
+						<div class="task" data-id="{{task.id}}">
+							{{ task.cell("Title") }}
+						</div>
+					{% end for %}
+				</td>
+			{% end for %}
+		</tr>
+	</table>
+</div>
+
+<style>
+	#schoolTasksApp table {
+		width:100%;
+		border-collapse: collapse;
+	}
+	
+	
+	#schoolTasksApp table .titles td {
+		text-align:center;
+		font-weight:bold;
+		font-size:15px;
+		width:25%;
+	}
+	
+	#schoolTasksApp table td {
+		border:1px solid #ccc;
+		vertical-align: top;
+		padding:10px;
+	}
+	
+	#schoolTasksApp .task {
+		padding: 10px;
+		margin-bottom:10px;
+		border-radius:3px;
+		cursor:pointer;
+		transition:all 0.2s ease;
+	}
+	
+	#schoolTasksApp .task:hover {
+		-webkit-transform:scale(1.07);
+	}
+	
+	#schoolTasksApp td:nth-child(1) .task {
+		background-color:#00f;
+		color:#fff;
+	}
+	
+	#schoolTasksApp td:nth-child(2) .task {
+		background-color:#f00;
+		color:#fff;
+	}
+	
+	#schoolTasksApp td:nth-child(3) .task {
+		background-color:#0f0;
+	}
+	
+	#schoolTasksApp td:nth-child(4) .task {
+		background-color:#ff8a00;
+	}
+</style>
+
+<script type="text/javascript">
+	$(document).ready(function(){
+		$(".task").click(function() {
+			dataplus.viewRow("School tasks", $(this).attr("data-id"));
+		});
+	});
+
+	setTimeout(function(){
+		location.reload(true)
+	}, 1000*60*2); //refresh every 2 minuets	
+</script>
