@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function, with_statement
 
 import contextlib
+import datetime
 import functools
 import sys
 import textwrap
@@ -8,7 +9,7 @@ import time
 import platform
 import weakref
 
-from tornado.concurrent import return_future
+from tornado.concurrent import return_future, Future
 from tornado.escape import url_escape
 from tornado.httpclient import AsyncHTTPClient
 from tornado.ioloop import IOLoop
@@ -20,6 +21,10 @@ from tornado.web import Application, RequestHandler, asynchronous, HTTPError
 
 from tornado import gen
 
+try:
+    from concurrent import futures
+except ImportError:
+    futures = None
 
 skipBefore33 = unittest.skipIf(sys.version_info < (3, 3), 'PEP 380 not available')
 skipNotCPython = unittest.skipIf(platform.python_implementation() != 'CPython',
@@ -281,15 +286,64 @@ class GenEngineTest(AsyncTestCase):
             self.stop()
         self.run_gen(f)
 
-    def test_multi_delayed(self):
+    def test_multi_dict(self):
+        @gen.engine
+        def f():
+            (yield gen.Callback("k1"))("v1")
+            (yield gen.Callback("k2"))("v2")
+            results = yield dict(foo=gen.Wait("k1"), bar=gen.Wait("k2"))
+            self.assertEqual(results, dict(foo="v1", bar="v2"))
+            self.stop()
+        self.run_gen(f)
+
+    # The following tests explicitly run with both gen.Multi
+    # and gen.multi_future (Task returns a Future, so it can be used
+    # with either).
+    def test_multi_yieldpoint_delayed(self):
         @gen.engine
         def f():
             # callbacks run at different times
-            responses = yield [
+            responses = yield gen.Multi([
                 gen.Task(self.delay_callback, 3, arg="v1"),
                 gen.Task(self.delay_callback, 1, arg="v2"),
-            ]
+            ])
             self.assertEqual(responses, ["v1", "v2"])
+            self.stop()
+        self.run_gen(f)
+
+    def test_multi_yieldpoint_dict_delayed(self):
+        @gen.engine
+        def f():
+            # callbacks run at different times
+            responses = yield gen.Multi(dict(
+                foo=gen.Task(self.delay_callback, 3, arg="v1"),
+                bar=gen.Task(self.delay_callback, 1, arg="v2"),
+            ))
+            self.assertEqual(responses, dict(foo="v1", bar="v2"))
+            self.stop()
+        self.run_gen(f)
+
+    def test_multi_future_delayed(self):
+        @gen.engine
+        def f():
+            # callbacks run at different times
+            responses = yield gen.multi_future([
+                gen.Task(self.delay_callback, 3, arg="v1"),
+                gen.Task(self.delay_callback, 1, arg="v2"),
+            ])
+            self.assertEqual(responses, ["v1", "v2"])
+            self.stop()
+        self.run_gen(f)
+
+    def test_multi_future_dict_delayed(self):
+        @gen.engine
+        def f():
+            # callbacks run at different times
+            responses = yield gen.multi_future(dict(
+                foo=gen.Task(self.delay_callback, 3, arg="v1"),
+                bar=gen.Task(self.delay_callback, 1, arg="v2"),
+            ))
+            self.assertEqual(responses, dict(foo="v1", bar="v2"))
             self.stop()
         self.run_gen(f)
 
@@ -305,6 +359,23 @@ class GenEngineTest(AsyncTestCase):
         self.assertLess(end - start, 1.0)
 
     @gen_test
+    def test_multi_empty(self):
+        # Empty lists or dicts should return the same type.
+        x = yield []
+        self.assertTrue(isinstance(x, list))
+        y = yield {}
+        self.assertTrue(isinstance(y, dict))
+
+    @gen_test
+    def test_multi_mixed_types(self):
+        # A YieldPoint (Wait) and Future (Task) can be combined
+        # (and use the YieldPoint codepath)
+        (yield gen.Callback("k1"))("v1")
+        responses = yield [gen.Wait("k1"),
+                           gen.Task(self.delay_callback, 3, arg="v2")]
+        self.assertEqual(responses, ["v1", "v2"])
+
+    @gen_test
     def test_future(self):
         result = yield self.async_future(1)
         self.assertEqual(result, 1)
@@ -313,6 +384,11 @@ class GenEngineTest(AsyncTestCase):
     def test_multi_future(self):
         results = yield [self.async_future(1), self.async_future(2)]
         self.assertEqual(results, [1, 2])
+
+    @gen_test
+    def test_multi_dict_future(self):
+        results = yield dict(foo=self.async_future(1), bar=self.async_future(2))
+        self.assertEqual(results, dict(foo=1, bar=2))
 
     def test_arguments(self):
         @gen.engine
@@ -698,8 +774,14 @@ class GenCoroutineTest(AsyncTestCase):
     def test_replace_context_exception(self):
         # Test exception handling: exceptions thrown into the stack context
         # can be caught and replaced.
+        # Note that this test and the following are for behavior that is
+        # not really supported any more:  coroutines no longer create a
+        # stack context automatically; but one is created after the first
+        # YieldPoint (i.e. not a Future).
         @gen.coroutine
         def f2():
+            (yield gen.Callback(1))()
+            yield gen.Wait(1)
             self.io_loop.add_callback(lambda: 1 / 0)
             try:
                 yield gen.Task(self.io_loop.add_timeout,
@@ -718,6 +800,8 @@ class GenCoroutineTest(AsyncTestCase):
         # can be caught and ignored.
         @gen.coroutine
         def f2():
+            (yield gen.Callback(1))()
+            yield gen.Wait(1)
             self.io_loop.add_callback(lambda: 1 / 0)
             try:
                 yield gen.Task(self.io_loop.add_timeout,
@@ -728,6 +812,31 @@ class GenCoroutineTest(AsyncTestCase):
         result = yield f2()
         self.assertEqual(result, 42)
         self.finished = True
+
+    @gen_test
+    def test_moment(self):
+        calls = []
+        @gen.coroutine
+        def f(name, yieldable):
+            for i in range(5):
+                calls.append(name)
+                yield yieldable
+        # First, confirm the behavior without moment: each coroutine
+        # monopolizes the event loop until it finishes.
+        immediate = Future()
+        immediate.set_result(None)
+        yield [f('a', immediate), f('b', immediate)]
+        self.assertEqual(''.join(calls), 'aaaaabbbbb')
+
+        # With moment, they take turns.
+        calls = []
+        yield [f('a', gen.moment), f('b', gen.moment)]
+        self.assertEqual(''.join(calls), 'ababababab')
+        self.finished = True
+
+        calls = []
+        yield [f('a', gen.moment), f('b', immediate)]
+        self.assertEqual(''.join(calls), 'abbbbbaaaa')
 
 
 class GenSequenceHandler(RequestHandler):
@@ -803,7 +912,6 @@ class GenExceptionHandler(RequestHandler):
 
 
 class GenCoroutineExceptionHandler(RequestHandler):
-    @asynchronous
     @gen.coroutine
     def get(self):
         # This test depends on the order of the two decorators.
@@ -908,6 +1016,157 @@ class GenWebTest(AsyncHTTPTestCase):
     def test_async_prepare_error_handler(self):
         response = self.fetch('/async_prepare_error')
         self.assertEqual(response.code, 403)
+
+
+class WithTimeoutTest(AsyncTestCase):
+    @gen_test
+    def test_timeout(self):
+        with self.assertRaises(gen.TimeoutError):
+            yield gen.with_timeout(datetime.timedelta(seconds=0.1),
+                                   Future())
+
+    @gen_test
+    def test_completes_before_timeout(self):
+        future = Future()
+        self.io_loop.add_timeout(datetime.timedelta(seconds=0.1),
+                                 lambda: future.set_result('asdf'))
+        result = yield gen.with_timeout(datetime.timedelta(seconds=3600),
+                                        future)
+        self.assertEqual(result, 'asdf')
+
+    @gen_test
+    def test_fails_before_timeout(self):
+        future = Future()
+        self.io_loop.add_timeout(
+            datetime.timedelta(seconds=0.1),
+            lambda: future.set_exception(ZeroDivisionError()))
+        with self.assertRaises(ZeroDivisionError):
+            yield gen.with_timeout(datetime.timedelta(seconds=3600), future)
+
+    @gen_test
+    def test_already_resolved(self):
+        future = Future()
+        future.set_result('asdf')
+        result = yield gen.with_timeout(datetime.timedelta(seconds=3600),
+                                        future)
+        self.assertEqual(result, 'asdf')
+
+    @unittest.skipIf(futures is None, 'futures module not present')
+    @gen_test
+    def test_timeout_concurrent_future(self):
+        with futures.ThreadPoolExecutor(1) as executor:
+            with self.assertRaises(gen.TimeoutError):
+                yield gen.with_timeout(self.io_loop.time(),
+                                       executor.submit(time.sleep, 0.1))
+
+    @unittest.skipIf(futures is None, 'futures module not present')
+    @gen_test
+    def test_completed_concurrent_future(self):
+        with futures.ThreadPoolExecutor(1) as executor:
+            yield gen.with_timeout(datetime.timedelta(seconds=3600),
+                                   executor.submit(lambda: None))
+
+class WaitIteratorTest(AsyncTestCase):
+    @gen_test
+    def test_empty_iterator(self):
+        g = gen.WaitIterator()
+        self.assertTrue(g.done(), 'empty generator iterated')
+
+        with self.assertRaises(ValueError):
+            g = gen.WaitIterator(False, bar=False)
+
+        self.assertEqual(g.current_index, None, "bad nil current index")
+        self.assertEqual(g.current_future, None, "bad nil current future")
+
+    @gen_test
+    def test_already_done(self):
+        f1 = Future()
+        f2 = Future()
+        f3 = Future()
+        f1.set_result(24)
+        f2.set_result(42)
+        f3.set_result(84)
+
+        g = gen.WaitIterator(f1, f2, f3)
+        i = 0
+        while not g.done():
+            r = yield g.next()
+            # Order is not guaranteed, but the current implementation
+            # preserves ordering of already-done Futures.
+            if i == 0:
+                self.assertEqual(g.current_index, 0)
+                self.assertIs(g.current_future, f1)
+                self.assertEqual(r, 24)
+            elif i == 1:
+                self.assertEqual(g.current_index, 1)
+                self.assertIs(g.current_future, f2)
+                self.assertEqual(r, 42)
+            elif i == 2:
+                self.assertEqual(g.current_index, 2)
+                self.assertIs(g.current_future, f3)
+                self.assertEqual(r, 84)
+            i += 1
+
+        self.assertEqual(g.current_index, None, "bad nil current index")
+        self.assertEqual(g.current_future, None, "bad nil current future")
+
+        dg = gen.WaitIterator(f1=f1, f2=f2)
+
+        while not dg.done():
+            dr = yield dg.next()
+            if dg.current_index == "f1":
+                self.assertTrue(dg.current_future==f1 and dr==24,
+                                "WaitIterator dict status incorrect")
+            elif dg.current_index == "f2":
+                self.assertTrue(dg.current_future==f2 and dr==42,
+                                "WaitIterator dict status incorrect")
+            else:
+                self.fail("got bad WaitIterator index {}".format(
+                    dg.current_index))
+
+            i += 1
+
+        self.assertEqual(dg.current_index, None, "bad nil current index")
+        self.assertEqual(dg.current_future, None, "bad nil current future")
+
+    def finish_coroutines(self, iteration, futures):
+        if iteration == 3:
+            futures[2].set_result(24)
+        elif iteration == 5:
+            futures[0].set_exception(ZeroDivisionError())
+        elif iteration == 8:
+            futures[1].set_result(42)
+            futures[3].set_result(84)
+
+        if iteration < 8:
+            self.io_loop.add_callback(self.finish_coroutines, iteration+1, futures)
+
+    @gen_test
+    def test_iterator(self):
+        futures = [Future(), Future(), Future(), Future()]
+
+        self.finish_coroutines(0, futures)
+
+        g = gen.WaitIterator(*futures)
+
+        i = 0
+        while not g.done():
+            try:
+                r = yield g.next()
+            except ZeroDivisionError:
+                self.assertIs(g.current_future, futures[0],
+                              'exception future invalid')
+            else:
+                if i == 0:
+                    self.assertEqual(r, 24, 'iterator value incorrect')
+                    self.assertEqual(g.current_index, 2, 'wrong index')
+                elif i == 2:
+                    self.assertEqual(r, 42, 'iterator value incorrect')
+                    self.assertEqual(g.current_index, 1, 'wrong index')
+                elif i == 3:
+                    self.assertEqual(r, 84, 'iterator value incorrect')
+                    self.assertEqual(g.current_index, 3, 'wrong index')
+            i += 1
 
 if __name__ == '__main__':
     unittest.main()

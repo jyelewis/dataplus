@@ -1,0 +1,9 @@
+cd "$( cd -P "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+echo "Downloading latest tornado"
+curl -L -o /tmp/tornado.zip https://github.com/tornadoweb/tornado/archive/master.zip 
+
+rm -r /tmp/tornado
+echo "extracting tornado"
+unzip -o /tmp/tornado -d /tmp/tornado
+mv /tmp/tornado/tornado-master/tornado tornado 

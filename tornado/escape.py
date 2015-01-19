@@ -25,7 +25,7 @@ from __future__ import absolute_import, division, print_function, with_statement
 import re
 import sys
 
-from tornado.util import bytes_type, unicode_type, basestring_type, u
+from tornado.util import unicode_type, basestring_type, u
 
 try:
     from urllib.parse import parse_qs as _parse_qs  # py3
@@ -49,12 +49,22 @@ try:
 except NameError:
     unichr = chr
 
-_XHTML_ESCAPE_RE = re.compile('[&<>"]')
-_XHTML_ESCAPE_DICT = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}
+_XHTML_ESCAPE_RE = re.compile('[&<>"\']')
+_XHTML_ESCAPE_DICT = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+                      '\'': '&#39;'}
 
 
 def xhtml_escape(value):
-    """Escapes a string so it is valid within HTML or XML."""
+    """Escapes a string so it is valid within HTML or XML.
+
+    Escapes the characters ``<``, ``>``, ``"``, ``'``, and ``&``.
+    When used in attribute values the escaped strings must be enclosed
+    in quotes.
+
+    .. versionchanged:: 3.2
+
+       Added the single quote to the list of escaped characters.
+    """
     return _XHTML_ESCAPE_RE.sub(lambda match: _XHTML_ESCAPE_DICT[match.group(0)],
                                 to_basestring(value))
 
@@ -65,7 +75,7 @@ def xhtml_unescape(value):
 
 
 # The fact that json_encode wraps json.dumps is an implementation detail.
-# Please see https://github.com/facebook/tornado/pull/706
+# Please see https://github.com/tornadoweb/tornado/pull/706
 # before sending a pull request that adds **kwargs to this function.
 def json_encode(value):
     """JSON-encodes the given Python object."""
@@ -99,7 +109,7 @@ def url_escape(value, plus=True):
     .. versionadded:: 3.1
         The ``plus`` argument
     """
-    quote = urllib_parse.quote if plus else urllib_parse.quote
+    quote = urllib_parse.quote_plus if plus else urllib_parse.quote
     return quote(utf8(value))
 
 
@@ -124,7 +134,7 @@ if sys.version_info[0] < 3:
         .. versionadded:: 3.1
            The ``plus`` argument
         """
-        unquote = (urllib_parse.unquote if plus else urllib_parse.unquote)
+        unquote = (urllib_parse.unquote_plus if plus else urllib_parse.unquote)
         if encoding is None:
             return unquote(utf8(value))
         else:
@@ -155,7 +165,7 @@ else:
                 value = to_basestring(value).replace('+', ' ')
             return urllib_parse.unquote_to_bytes(value)
         else:
-            unquote = (urllib_parse.unquote if plus
+            unquote = (urllib_parse.unquote_plus if plus
                        else urllib_parse.unquote)
             return unquote(to_basestring(value), encoding=encoding)
 
@@ -177,7 +187,7 @@ else:
         return encoded
 
 
-_UTF8_TYPES = (bytes_type, type(None))
+_UTF8_TYPES = (bytes, type(None))
 
 
 def utf8(value):
@@ -188,8 +198,10 @@ def utf8(value):
     """
     if isinstance(value, _UTF8_TYPES):
         return value
-    assert isinstance(value, unicode_type), \
-        "Expected bytes, unicode, or None; got %r" % type(value)
+    if not isinstance(value, unicode_type):
+        raise TypeError(
+            "Expected bytes, unicode, or None; got %r" % type(value)
+        )
     return value.encode("utf-8")
 
 _TO_UNICODE_TYPES = (unicode_type, type(None))
@@ -203,8 +215,10 @@ def to_unicode(value):
     """
     if isinstance(value, _TO_UNICODE_TYPES):
         return value
-    assert isinstance(value, bytes_type), \
-        "Expected bytes, unicode, or None; got %r" % type(value)
+    if not isinstance(value, bytes):
+        raise TypeError(
+            "Expected bytes, unicode, or None; got %r" % type(value)
+        )
     return value.decode("utf-8")
 
 # to_unicode was previously named _unicode not because it was private,
@@ -232,8 +246,10 @@ def to_basestring(value):
     """
     if isinstance(value, _BASESTRING_TYPES):
         return value
-    assert isinstance(value, bytes_type), \
-        "Expected bytes, unicode, or None; got %r" % type(value)
+    if not isinstance(value, bytes):
+        raise TypeError(
+            "Expected bytes, unicode, or None; got %r" % type(value)
+        )
     return value.decode("utf-8")
 
 
@@ -248,7 +264,7 @@ def recursive_unicode(obj):
         return list(recursive_unicode(i) for i in obj)
     elif isinstance(obj, tuple):
         return tuple(recursive_unicode(i) for i in obj)
-    elif isinstance(obj, bytes_type):
+    elif isinstance(obj, bytes):
         return to_unicode(obj)
     else:
         return obj
